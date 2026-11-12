@@ -4,7 +4,11 @@ import { createIncognito } from './incognito'
 
 type FakeRepo = Record<string, unknown> & { id: string; path: string }
 
-function fakeOrca(repos: FakeRepo[], worktrees: Record<string, Record<string, unknown>[]> = {}) {
+function fakeOrca(
+  repos: FakeRepo[],
+  worktrees: Record<string, Record<string, unknown>[]> = {},
+  groups: Record<string, any>[] = []
+) {
   let nextId = 1
   let runtimeId = 'runtime-1'
   const calls: { method: string; params: any }[] = []
@@ -31,6 +35,19 @@ function fakeOrca(repos: FakeRepo[], worktrees: Record<string, Record<string, un
           return { repo: byId(params.repo) }
         case 'worktree.set':
           return { ok: true }
+        case 'projectGroup.list':
+          return { groups: groups.map((g) => ({ ...g })) }
+        case 'projectGroup.create': {
+          const group = { id: `group-${nextId++}`, ...params }
+          groups.push(group)
+          return { group }
+        }
+        case 'projectGroup.update':
+          Object.assign(groups.find((g) => g.id === params.groupId)!, params.updates)
+          return { group: groups.find((g) => g.id === params.groupId) }
+        case 'projectGroup.delete':
+          groups = groups.filter((g) => g.id !== params.groupId)
+          return { deleted: true }
       }
       throw new Error(`unexpected ${method}`)
     }
@@ -46,6 +63,7 @@ function fakeOrca(repos: FakeRepo[], worktrees: Record<string, Record<string, un
     store,
     calls,
     repos: () => repos,
+    groups: () => groups,
     restart: () => void (runtimeId = 'runtime-2')
   }
 }
@@ -185,4 +203,76 @@ test('changing the passcode needs the current one', async () => {
   await incognito.setPasscode('1234')
   assert.equal((await incognito.setPasscode('5678', '0000')).error, 'The current passcode is wrong.')
   assert.equal((await incognito.setPasscode('5678', '1234')).error, undefined)
+})
+
+test('hiding a group hides its projects and the emptied group, unlock brings both back', async () => {
+  const orca = fakeOrca(
+    [
+      { id: 'a', path: '/p/a', projectGroupId: 'g7', projectGroupOrder: 0 },
+      { id: 'b', path: '/p/b', projectGroupId: 'g7', projectGroupOrder: 1 },
+      { id: 'c', path: '/p/c', projectGroupId: 'gw' }
+    ],
+    {},
+    [
+      { id: 'g7', name: '7N', color: '#0a0', isCollapsed: true, tabOrder: 2 },
+      { id: 'gw', name: 'Work', tabOrder: 1 }
+    ]
+  )
+  const incognito = setup(orca)
+  await incognito.setPasscode('1234')
+  const locked = await incognito.hideGroup('g7')
+  assert.deepEqual(
+    orca.repos().map((r) => r.id),
+    ['c']
+  )
+  assert.deepEqual(
+    orca.groups().map((g) => g.name),
+    ['Work']
+  )
+  assert.deepEqual(
+    locked.groups.map((g) => g.name),
+    ['Work']
+  )
+  assert.equal(locked.incognitoCount, 2)
+
+  const unlocked = await incognito.unlock('1234')
+  const group = orca.groups().find((g) => g.name === '7N')!
+  assert.ok(group && group.id !== 'g7')
+  assert.equal(group.color, '#0a0')
+  assert.equal(group.isCollapsed, true)
+  assert.deepEqual(
+    orca.repos().filter((r) => r.projectGroupId === group.id).map((r) => r.path).sort(),
+    ['/p/a', '/p/b']
+  )
+  assert.deepEqual(
+    unlocked.incognito.map((p) => p.group),
+    ['7N', '7N']
+  )
+
+  // Locking again removes the recreated group too.
+  await incognito.lock()
+  assert.deepEqual(
+    orca.groups().map((g) => g.name),
+    ['Work']
+  )
+})
+
+test('a group that still holds visible projects stays', async () => {
+  const orca = fakeOrca(
+    [
+      { id: 'a', path: '/p/a', projectGroupId: 'g7' },
+      { id: 'b', path: '/p/b', projectGroupId: 'g7' }
+    ],
+    {},
+    [{ id: 'g7', name: '7N' }]
+  )
+  const incognito = setup(orca)
+  await incognito.setPasscode('1234')
+  await incognito.hideProject('a')
+  assert.deepEqual(
+    orca.groups().map((g) => g.id),
+    ['g7']
+  )
+  await incognito.unlock('1234')
+  assert.equal(orca.repos().find((r) => r.path === '/p/a')!.projectGroupId, 'g7')
 })

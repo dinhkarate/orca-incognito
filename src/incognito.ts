@@ -51,11 +51,25 @@ type VaultEntry = {
   error?: string
 }
 
+type Group = {
+  id: string
+  name: string
+  parentPath?: string | null
+  connectionId?: string | null
+  parentGroupId?: string | null
+  tabOrder?: number
+  isCollapsed?: boolean
+  color?: string | null
+  rootProjectOrder?: number | null
+}
+
 type Vault = {
   unlocked: boolean
   /** The Orca runtime that was running when unlocked; a different one means Orca restarted. */
   runtimeId?: string
   projects: VaultEntry[]
+  /** Project groups that were left empty by hiding, removed from Orca until unlock. */
+  groups?: Group[]
 }
 
 type PasscodeRecord = { salt: string; hash: string }
@@ -90,8 +104,8 @@ const REPO_SETTINGS = [
   'sourceControlAi'
 ] as const
 
-// Fallback when a newer or older Orca refuses one of the fields above.
-const ESSENTIAL_SETTINGS = ['displayName', 'badgeColor', 'repoIcon', 'projectGroupId', 'projectGroupOrder']
+// Fallback when a newer or older Orca refuses one of the fields above (or the group is gone).
+const ESSENTIAL_SETTINGS = ['displayName', 'badgeColor', 'repoIcon']
 
 const VAULT_KEY = 'vault'
 const PASSCODE_KEY = 'passcode'
@@ -160,6 +174,81 @@ export function createIncognito(deps: {
   async function listRepos(): Promise<Repo[]> {
     const result = await rpc.call<{ repos: Repo[] }>('repo.list', {})
     return result.repos
+  }
+
+  async function listGroups(): Promise<Group[]> {
+    const result = await rpc.call<{ groups: Group[] }>('projectGroup.list')
+    return result.groups
+  }
+
+  /** Removes groups that hiding left empty, so their names don't show either. */
+  async function concealEmptyGroups(vault: Vault): Promise<void> {
+    const [repos, groups] = await Promise.all([listRepos(), listGroups()])
+    for (const group of groups) {
+      const hiddenHere = vault.projects.some(
+        (p) => !p.visible && p.settings.projectGroupId === group.id
+      )
+      const stillUsed =
+        repos.some((r) => r.projectGroupId === group.id) ||
+        groups.some((g) => g.parentGroupId === group.id)
+      if (!hiddenHere || stillUsed || group.connectionId) {
+        continue
+      }
+      vault.groups = [...(vault.groups ?? []).filter((g) => g.id !== group.id), group]
+      await saveVault(vault)
+      await rpc
+        .call('projectGroup.delete', { groupId: group.id })
+        .catch((e: unknown) => log(`could not remove an empty group: ${message(e)}`))
+    }
+  }
+
+  /** Recreates the groups concealEmptyGroups removed and points their projects at the new ids. */
+  async function revealGroups(vault: Vault): Promise<void> {
+    const pending = [...(vault.groups ?? [])]
+    const existing = new Set((await listGroups()).map((g) => g.id))
+    const newIds = new Map<string, string>()
+    // Parents first, so a nested group can name its parent's new id.
+    pending.sort(
+      (a, b) =>
+        Number(pending.some((g) => g.id === a.parentGroupId)) -
+        Number(pending.some((g) => g.id === b.parentGroupId))
+    )
+    for (const group of pending) {
+      const parent = group.parentGroupId
+        ? (newIds.get(group.parentGroupId) ?? (existing.has(group.parentGroupId) ? group.parentGroupId : null))
+        : null
+      try {
+        const created = await rpc.call<{ group: Group }>('projectGroup.create', {
+          name: group.name,
+          ...(group.parentPath ? { parentPath: group.parentPath } : {}),
+          ...(parent ? { parentGroupId: parent } : {})
+        })
+        newIds.set(group.id, created.group.id)
+        await rpc
+          .call('projectGroup.update', {
+            groupId: created.group.id,
+            updates: pick(group, ['isCollapsed', 'tabOrder', 'rootProjectOrder', 'color'])
+          })
+          .catch((e: unknown) => log(`group settings restore failed: ${message(e)}`))
+      } catch (error) {
+        log(`could not recreate a group: ${message(error)}`)
+      }
+    }
+    for (const entry of vault.projects) {
+      const oldId = entry.settings.projectGroupId as string | undefined
+      if (!oldId || existing.has(oldId)) {
+        continue
+      }
+      const newId = newIds.get(oldId)
+      if (newId) {
+        entry.settings.projectGroupId = newId
+      } else {
+        delete entry.settings.projectGroupId
+        delete entry.settings.projectGroupOrder
+      }
+    }
+    vault.groups = []
+    await saveVault(vault)
   }
 
   async function snapshot(repo: Repo): Promise<Omit<VaultEntry, 'visible'>> {
@@ -264,6 +353,24 @@ export function createIncognito(deps: {
     vault.unlocked = false
     delete vault.runtimeId
     await saveVault(vault)
+    await concealEmptyGroups(vault)
+  }
+
+  /** Makes projects incognito: gone now while locked, or at the next lock while unlocked. */
+  async function conceal(repos: Repo[]): Promise<void> {
+    const vault = await loadVault()
+    for (const repo of repos) {
+      if (vault.unlocked) {
+        const entry: VaultEntry = { ...(await snapshot(repo)), visible: true }
+        vault.projects = [...vault.projects.filter((p) => p.path !== repo.path), entry]
+        await saveVault(vault)
+      } else {
+        await hide(vault, repo)
+      }
+    }
+    if (!vault.unlocked) {
+      await concealEmptyGroups(vault)
+    }
   }
 
   async function verify(passcode: string): Promise<boolean> {
@@ -282,21 +389,40 @@ export function createIncognito(deps: {
     const vault = available ? await loadVault() : { unlocked: false, projects: [] as VaultEntry[] }
     const incognitoPaths = new Set(vault.projects.map((p) => p.path))
     let projects: ProjectRow[] = []
+    let groups: Group[] = []
     try {
+      groups = (await listGroups()).filter((g) => !g.connectionId)
+      const groupName = new Map(groups.map((g) => [g.id, g.name]))
       projects = (await listRepos())
         .filter((r) => isLocal(r) && !incognitoPaths.has(r.path))
-        .map((r) => ({ id: r.id, name: repoName(r), path: r.path }))
+        .map((r) => {
+          const group = typeof r.projectGroupId === 'string' ? groupName.get(r.projectGroupId) : undefined
+          return {
+            id: r.id,
+            name: repoName(r),
+            path: r.path,
+            ...(group ? { groupId: r.projectGroupId as string, group } : {})
+          }
+        })
     } catch (e) {
       error ??= `Cannot reach Orca: ${message(e)}`
     }
+    const knownGroups = new Map([...groups, ...(vault.groups ?? [])].map((g) => [g.id, g.name]))
     return {
       available,
       hasPasscode: available && (await secrets.get(PASSCODE_KEY)) !== null,
       unlocked: vault.unlocked,
       incognitoCount: vault.projects.length,
       projects,
+      groups: groups
+        .slice()
+        .sort((a, b) => (a.tabOrder ?? 0) - (b.tabOrder ?? 0))
+        .map((g) => ({ id: g.id, name: g.name })),
       incognito: vault.unlocked
-        ? vault.projects.map((p) => ({ path: p.path, name: p.name, ...(p.error ? { error: p.error } : {}) }))
+        ? vault.projects.map((p) => {
+            const group = knownGroups.get(p.settings.projectGroupId as string)
+            return { path: p.path, name: p.name, ...(group ? { group } : {}), ...(p.error ? { error: p.error } : {}) }
+          })
         : [],
       ...(retryAt && retryAt > now() ? { retryAt } : {}),
       ...(error ? { error } : {})
@@ -347,6 +473,7 @@ export function createIncognito(deps: {
         failures = 0
         retryAt = undefined
         const vault = await loadVault()
+        await revealGroups(vault)
         const repos = await listRepos()
         for (const entry of vault.projects) {
           if (!entry.visible) {
@@ -372,15 +499,19 @@ export function createIncognito(deps: {
         if (!isLocal(repo)) {
           return 'Only projects on this computer can be incognito.'
         }
-        const vault = await loadVault()
-        if (vault.unlocked) {
-          // Like the other incognito projects, it stays until the next lock.
-          const entry: VaultEntry = { ...(await snapshot(repo)), visible: true }
-          vault.projects = [...vault.projects.filter((p) => p.path !== repo.path), entry]
-          await saveVault(vault)
-        } else {
-          await hide(vault, repo)
+        await conceal([repo])
+      }),
+
+    hideGroup: (groupId: string) =>
+      act(async () => {
+        if ((await secrets.get(PASSCODE_KEY)) === null) {
+          return 'Set a passcode first.'
         }
+        const repos = (await listRepos()).filter((r) => r.projectGroupId === groupId && isLocal(r))
+        if (repos.length === 0) {
+          return 'That group has no projects on this computer.'
+        }
+        await conceal(repos)
       }),
 
     forgetProject: (path: string) =>

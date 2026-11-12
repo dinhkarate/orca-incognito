@@ -9,6 +9,7 @@ const base: IncognitoState = {
   unlocked: false,
   incognitoCount: 1,
   projects: [{ id: 'r2', name: 'other', path: '/work/other' }],
+  groups: [],
   incognito: []
 }
 
@@ -68,5 +69,35 @@ test('unlock lists the incognito projects and can lock again', async () => {
   await view.press({ text: 'Lock and hide them' })
   assert.equal(view.find({ text: 'Client X' }), null)
   assert.deepEqual(view.errors, [])
+  await view.unmount()
+})
+
+test('groups projects and hides a whole group after confirming', async () => {
+  const hidden: string[] = []
+  const grouped: IncognitoState = {
+    ...base,
+    projects: [
+      { id: 'a', name: 'alpha', path: '/p/a', groupId: 'g7', group: '7N' },
+      { id: 'b', name: 'beta', path: '/p/b', groupId: 'g7', group: '7N' },
+      { id: 'c', name: 'gamma', path: '/p/c' }
+    ],
+    groups: [{ id: 'g7', name: '7N' }]
+  }
+  const host = mockHost({
+    requests: {
+      'state.get': () => grouped,
+      'group.hide': ({ groupId }) => (hidden.push(groupId), { ...base, projects: [], incognitoCount: 3 })
+    }
+  })
+  const view = await mount(panel, { host })
+  assert.ok(view.find({ text: /^7N/ }))
+  assert.ok(view.find({ text: /^No group/ }))
+  await view.press({ text: 'Hide group' })
+  assert.ok(view.find({ label: 'Make the 7N group incognito?' }))
+  assert.ok(view.find({ text: /Its 2 projects leave Orca now/ }))
+  await view.press({ text: 'Make incognito' })
+  assert.deepEqual(hidden, ['g7'])
+  assert.deepEqual(view.errors, [])
+  assert.deepEqual(view.refusals, [])
   await view.unmount()
 })

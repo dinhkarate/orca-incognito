@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "incognito-projects",
   "name": "Incognito Projects",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hide private projects from Orca behind a passcode, and bring them back when you need them.",
   "author": { "name": "dinhkarate", "url": "https://github.com/dinhkarate" },
   "repository": "https://github.com/dinhkarate/orca-incognito",

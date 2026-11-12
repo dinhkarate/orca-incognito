@@ -6,10 +6,13 @@ project, something you don't want on screen during a demo.
 Open the **Incognito** panel in the right sidebar:
 
 1. **Set a passcode** (at least 4 characters).
-2. Press **Hide** next to a project. It leaves Orca at once.
+2. Press **Hide** next to a project, or **Hide group** to hide every project in one of Orca's
+   project groups. They leave Orca at once. A group that hiding leaves empty is removed too, so
+   its name doesn't show either.
 3. To work on it again, enter the passcode and press **Show incognito projects**. Every incognito
    project comes back with its name, color, icon, group, hooks and other settings, and its
-   workspaces with their names, comments and board status.
+   workspaces with their names, comments and board status. Removed groups are created again with
+   their name, color, collapsed state and order.
 4. Press **Lock and hide them** when you are done. If Orca restarts while they are showing, they
    are hidden again shortly after it starts.
 

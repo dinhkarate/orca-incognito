@@ -28,6 +28,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('unlock', ({ passcode }) => answer(incognito.unlock(passcode)))
   orca.panels.handle('lock', () => answer(incognito.lock()))
   orca.panels.handle('project.hide', ({ id }) => answer(incognito.hideProject(id)))
+  orca.panels.handle('group.hide', ({ groupId }) => answer(incognito.hideGroup(groupId)))
   orca.panels.handle('project.forget', ({ path }) => answer(incognito.forgetProject(path)))
 
   let checked = false

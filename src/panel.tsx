@@ -15,15 +15,17 @@ import {
   Text,
   type PanelContext
 } from 'orca'
-import type { IncognitoState, ProjectRow } from './protocol'
+import type { IncognitoState } from './protocol'
+
+type Pending = { kind: 'project' | 'group'; id: string; name: string; count: number }
 
 const state = atom<IncognitoState | null>(null)
 const busy = atom(false)
 const passcode = atom('')
 const confirmPasscode = atom('')
 const filter = atom('')
-/** The project waiting for "Hide" to be confirmed. */
-const confirming = atom<ProjectRow | null>(null)
+/** The project or group waiting for "Hide" to be confirmed. */
+const confirming = atom<Pending | null>(null)
 
 async function run(task: () => Promise<IncognitoState>): Promise<void> {
   set(busy, true)
@@ -95,31 +97,59 @@ function Unlock({ current }: { current: IncognitoState }) {
   )
 }
 
+function confirmText(pending: Pending, unlocked: boolean): string {
+  if (pending.kind === 'group') {
+    return unlocked
+      ? `Its ${pending.count} projects stay visible until you lock.`
+      : `Its ${pending.count} projects leave Orca now, and the group with them. Their terminals and agents stop; files and Git worktrees stay on disk.`
+  }
+  return unlocked
+    ? 'It stays visible until you lock.'
+    : 'It leaves Orca now. Its terminals and agents stop; files and Git worktrees stay on disk.'
+}
+
 function Projects({ current }: { current: IncognitoState }) {
   const isBusy = read(busy)
   const query = read(filter).toLowerCase()
   const pending = read(confirming)
   const rows = current.projects.filter(
-    (p) => !query || p.name.toLowerCase().includes(query) || p.path.toLowerCase().includes(query)
+    (p) =>
+      !query ||
+      p.name.toLowerCase().includes(query) ||
+      p.path.toLowerCase().includes(query) ||
+      (p.group ?? '').toLowerCase().includes(query)
   )
+  const sections = [
+    ...current.groups.map((g) => ({ id: g.id, name: g.name })),
+    { id: null, name: 'No group' }
+  ]
+    .map((s) => ({
+      ...s,
+      rows: rows.filter((p) => (p.groupId ?? null) === s.id),
+      total: current.projects.filter((p) => (p.groupId ?? null) === s.id).length
+    }))
+    .filter((s) => s.rows.length > 0)
   return (
     <Stack gap="sm">
       <Heading level={2}>Projects</Heading>
       {pending ? (
-        <Callout tone="warning" title={`Make ${pending.name} incognito?`}>
+        <Callout
+          tone="warning"
+          title={pending.kind === 'group' ? `Make the ${pending.name} group incognito?` : `Make ${pending.name} incognito?`}
+        >
           <Stack gap="sm">
-            <Text size="sm">
-              {current.unlocked
-                ? 'It stays visible until you lock.'
-                : 'It leaves Orca now. Its terminals and agents stop; files and Git worktrees stay on disk.'}
-            </Text>
+            <Text size="sm">{confirmText(pending, current.unlocked)}</Text>
             <Row gap="xs">
               <Button
                 tone="warning"
                 disabled={isBusy}
                 onPress={() => {
                   set(confirming, null)
-                  void run(() => plugin.request('project.hide', { id: pending.id }))
+                  void run(() =>
+                    pending.kind === 'group'
+                      ? plugin.request('group.hide', { groupId: pending.id })
+                      : plugin.request('project.hide', { id: pending.id })
+                  )
                 }}
               >
                 Make incognito
@@ -132,17 +162,41 @@ function Projects({ current }: { current: IncognitoState }) {
         </Callout>
       ) : null}
       {current.projects.length > 8 ? (
-        <Input label="Filter projects" labelHidden type="search" placeholder="Filter projects" value={read(filter)} onChange={(v) => set(filter, v)} />
+        <Input label="Filter projects" labelHidden type="search" placeholder="Filter projects or groups" value={read(filter)} onChange={(v) => set(filter, v)} />
       ) : null}
-      {rows.map((p) => (
-        <Row key={p.id} justify="between" gap="sm">
-          <Text truncate>{p.name}</Text>
-          <Button size="sm" variant="ghost" disabled={isBusy} onPress={() => set(confirming, p)}>
-            Hide
-          </Button>
-        </Row>
+      {sections.map((s) => (
+        <Stack key={s.id ?? 'none'} gap="xs">
+          <Row justify="between" gap="sm">
+            <Text weight="semibold" truncate>
+              {s.name} <Badge>{String(s.total)}</Badge>
+            </Text>
+            {s.id ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={isBusy}
+                onPress={() => set(confirming, { kind: 'group', id: s.id as string, name: s.name, count: s.total })}
+              >
+                Hide group
+              </Button>
+            ) : null}
+          </Row>
+          {s.rows.map((p) => (
+            <Row key={p.id} justify="between" gap="sm">
+              <Text truncate>{p.name}</Text>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={isBusy}
+                onPress={() => set(confirming, { kind: 'project', id: p.id, name: p.name, count: 1 })}
+              >
+                Hide
+              </Button>
+            </Row>
+          ))}
+        </Stack>
       ))}
-      {rows.length === 0 ? <Text muted size="sm">No projects.</Text> : null}
+      {sections.length === 0 ? <Text muted size="sm">No projects.</Text> : null}
     </Stack>
   )
 }
@@ -155,7 +209,10 @@ function Incognito({ current }: { current: IncognitoState }) {
       {current.incognito.map((p) => (
         <Stack key={p.path} gap="xs">
           <Row justify="between" gap="sm">
-            <Text truncate>{p.name}</Text>
+            <Text truncate>
+              {p.name}
+              {p.group ? <Text muted size="sm">{` · ${p.group}`}</Text> : null}
+            </Text>
             <Button
               size="sm"
               variant="ghost"
