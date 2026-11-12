@@ -1,0 +1,29 @@
+{
+  "manifestVersion": 2,
+  "id": "incognito-projects",
+  "name": "Incognito Projects",
+  "version": "0.1.0",
+  "description": "Hide private projects from Orca behind a passcode, and bring them back when you need them.",
+  "author": { "name": "dinhkarate", "url": "https://github.com/dinhkarate" },
+  "repository": "https://github.com/dinhkarate/orca-incognito",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "incognito-projects",
+        "title": "Incognito",
+        "icon": "settings",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "events": [{ "on": "workspace.changed" }]
+  },
+  "capabilities": [{ "kind": "secrets:own" }, { "kind": "workspace:read" }]
+}
